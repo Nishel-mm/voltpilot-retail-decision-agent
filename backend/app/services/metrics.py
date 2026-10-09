@@ -6,7 +6,7 @@ All of these functions are deterministic. None of them call an LLM.
 from datetime import date, timedelta
 from math import inf
 
-from ..config import DEMO_TODAY
+from ..config import business_date
 
 
 def parse_date(value: str) -> date:
@@ -14,7 +14,7 @@ def parse_date(value: str) -> date:
 
 
 def today() -> date:
-    return parse_date(DEMO_TODAY)
+    return business_date()
 
 
 def get_assumptions(conn) -> dict[str, float | int]:
@@ -37,15 +37,6 @@ def assumption_records(conn) -> list[dict]:
 
 
 def sales_velocity(conn, product_id: int, store_id: int, lookback_days: int) -> float:
-    # If the retailer has entered/imported observed data for this product/store,
-    # prefer it over seeded demo velocity so operational decisions adapt to their data.
-    from .sales_data import observed_sales_velocity
-    observed = observed_sales_velocity(conn, product_id, store_id, lookback_days)
-    if observed is not None:
-        return observed
-
-    # Fallback for untouched preloaded demo products only. Forecast Lab never uses
-    # this table as training data.
     start = today() - timedelta(days=lookback_days)
     row = conn.execute(
         """
@@ -53,7 +44,7 @@ def sales_velocity(conn, product_id: int, store_id: int, lookback_days: int) -> 
         FROM sales_daily
         WHERE product_id = ? AND store_id = ? AND sale_date > ? AND sale_date <= ?
         """,
-        (product_id, store_id, start.isoformat(), DEMO_TODAY),
+        (product_id, store_id, start.isoformat(), today().isoformat()),
     ).fetchone()
     total = row["total"] or 0
     if lookback_days <= 0:

@@ -1,9 +1,29 @@
 import os
 from pathlib import Path
+from datetime import datetime, date
+from zoneinfo import ZoneInfo
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = Path(os.environ.get("VOLTPILOT_DB", DATA_DIR / "voltpilot.db"))
+# Set DATABASE_URL only on the deployed service to use hosted PostgreSQL.
+# Local development keeps SQLite unless DATABASE_URL is explicitly configured.
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+USE_POSTGRES = DATABASE_URL.lower().startswith(("postgres://", "postgresql://"))
+# Safe-by-default: starter catalogue is allowed, synthetic business history is opt-in only.
+AUTO_SEED_DEMO = os.environ.get("VOLTPILOT_AUTO_SEED_DEMO", "false").strip().lower() in {"1", "true", "yes"}
+ALLOW_DEMO_RESET = os.environ.get("VOLTPILOT_ALLOW_DEMO_RESET", "false").strip().lower() in {"1", "true", "yes"}
+BUSINESS_TIMEZONE = os.environ.get("VOLTPILOT_TIMEZONE", "Asia/Kolkata")
+BUSINESS_DATE_OVERRIDE = os.environ.get("VOLTPILOT_BUSINESS_DATE", "").strip()
+
+def business_date() -> date:
+    """Return the configured business date (India by default); tests can override it."""
+    if BUSINESS_DATE_OVERRIDE:
+        return date.fromisoformat(BUSINESS_DATE_OVERRIDE)
+    try:
+        return datetime.now(ZoneInfo(BUSINESS_TIMEZONE)).date()
+    except Exception:
+        return datetime.now().date()
 
 # Local development origins plus comma-separated production origins.
 # Example: FRONTEND_ORIGINS=https://voltpilot-retail-web-nishel.onrender.com

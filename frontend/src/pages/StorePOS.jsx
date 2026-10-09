@@ -31,7 +31,7 @@ function StageButton({ active, number, title, onClick, disabled }) {
 export default function StorePOS() {
   const navigate = useNavigate();
   const { saleId } = useParams();
-  const [storeId, setStoreId] = useState(1);
+  const [storeId, setStoreId] = useState(null);
   const [storeData, setStoreData] = useState({ stores: [], items: [], categories: [] });
   const [recentSales, setRecentSales] = useState([]);
   const [receiptData, setReceiptData] = useState(null);
@@ -51,12 +51,26 @@ export default function StorePOS() {
   const [savingReceipt, setSavingReceipt] = useState(false);
   const [newProduct, setNewProduct] = useState({ sku: "", name: "", category: "Laptops", unit_cost: "", selling_price: "", initial_stock: "0", note: "New stock added through Store & Product Vault" });
   const [receiptForm, setReceiptForm] = useState({ quantity: "1", note: "Stock received at store" });
+  const [newStore, setNewStore] = useState({ code: "", name: "", city: "", region: "" });
+  const [savingStore, setSavingStore] = useState(false);
 
   async function reloadStore() {
     setLoading(true);
     setError("");
     try {
-      const [catalog, sales] = await Promise.all([api.storeCatalog(storeId), api.storeSales(storeId)]);
+      const availableStores = await api.stores();
+      if (!availableStores.length) {
+        setStoreData({ store: null, stores: [], items: [], categories: [], data_origin: "No retailer data has been entered yet." });
+        setRecentSales([]);
+        return;
+      }
+      const selectedExists = availableStores.some((store) => Number(store.id) === Number(storeId));
+      if (!selectedExists) {
+        setStoreData((previous) => ({ ...previous, stores: availableStores }));
+        setStoreId(Number(availableStores[0].id));
+        return;
+      }
+      const [catalog, sales] = await Promise.all([api.storeCatalog(Number(storeId)), api.storeSales(Number(storeId))]);
       setStoreData(catalog);
       setRecentSales(sales.items || []);
     } catch (err) {
@@ -149,6 +163,27 @@ export default function StorePOS() {
     setError("");
   }
 
+  async function submitNewStore(event) {
+    event.preventDefault();
+    setSavingStore(true); setError(""); setNotice("");
+    try {
+      const result = await api.createStore({
+        code: newStore.code.trim().toUpperCase(),
+        name: newStore.name.trim(),
+        city: newStore.city.trim(),
+        region: newStore.region.trim(),
+      });
+      setStoreData({ store: result.store, stores: [result.store], items: [], categories: [], business_date: new Date().toISOString().slice(0, 10) });
+      setStoreId(Number(result.store.id));
+      setNewStore({ code: "", name: "", city: "", region: "" });
+      setNotice(result.message || "Store created. Add products and opening stock next.");
+    } catch (err) {
+      setError(err.message || "Could not create store.");
+    } finally {
+      setSavingStore(false);
+    }
+  }
+
   async function submitNewProduct(event) {
     event.preventDefault();
     setSavingProduct(true); setError(""); setNotice("");
@@ -216,17 +251,17 @@ export default function StorePOS() {
     if (!sale) return null;
     return (
       <div className="page pos-page">
-        <div className="topbar"><div><p className="eyebrow">Store operations / completed sale</p><h2 className="page-title">Sales receipt</h2><p className="sub">A recorded demo transaction. No real payment was processed.</p></div><div className="row"><button className="btn" onClick={() => window.print()}><Printer size={16} /> Print receipt</button><button className="btn primary" onClick={() => navigate("/store")}><ArrowLeft size={16} /> Back to Store</button></div></div>
+        <div className="topbar"><div><p className="eyebrow">Store operations / completed sale</p><h2 className="page-title">Sales receipt</h2><p className="sub">A recorded prototype transaction. No real payment was processed.</p></div><div className="row"><button className="btn" onClick={() => window.print()}><Printer size={16} /> Print receipt</button><button className="btn primary" onClick={() => navigate("/store")}><ArrowLeft size={16} /> Back to Store</button></div></div>
         <section className="pos-receipt card">
           <div className="pos-receipt-brand"><div className="pos-receipt-mark"><Store size={20} /></div><div><h3>VoltKart Electronics</h3><p>{sale.store_name}</p></div><span className="pos-sold-label"><CheckCircle2 size={15} /> SOLD</span></div>
           <div className="pos-receipt-meta"><div><span>Invoice</span><strong>{sale.invoice_number}</strong></div><div><span>Date recorded</span><strong>{new Date(sale.created_at).toLocaleString()}</strong></div><div><span>Customer</span><strong>{sale.customer_name || "Walk-in customer"}</strong></div><div><span>Payment</span><strong>{String(sale.payment_method).toUpperCase()} · simulated</strong></div></div>
           <div className="table-wrap"><table className="pos-table"><thead><tr><th>Item</th><th>Qty</th><th>Unit price</th><th className="align-right">Line total</th></tr></thead><tbody>{receiptData.items.map((line) => <tr key={line.id}><td><strong>{line.product_name}</strong><small>{line.sku}</small></td><td>{line.quantity}</td><td>{inr(line.unit_price)}</td><td className="align-right">{inr(line.line_total)}</td></tr>)}</tbody></table></div>
           <div className="pos-receipt-totals"><div><span>Subtotal</span><strong>{inr(sale.subtotal)}</strong></div><div><span>Demo tax estimate ({Math.round(Number(sale.tax_rate) * 100)}%)</span><strong>{inr(sale.tax_amount)}</strong></div><div className="pos-total-line"><span>Total</span><strong>{inr(sale.total_amount)}</strong></div></div>
-          <p className="pos-footnote">Demo only: the tax figure is illustrative, not a statutory tax invoice. Inventory and daily sales history were updated in SQLite for the prototype.</p>
+          <p className="pos-footnote">Demo only: the tax figure is illustrative, not a statutory tax invoice. Inventory and daily sales history were updated in the connected database for the prototype.</p>
           <div className="ok-banner pos-message"><BadgeCheck size={17} /> Sale is saved. On-hand stock, daily sales history and pending recommendations were refreshed.</div>
         </section>
         {receiptData.agent_analysis ? <section className="card pos-agent-reaction">
-          <div className="pos-section-head"><div><p className="eyebrow">After-sale system check</p><h3>VoltPilot re-analysed the seven risk areas</h3><p className="muted">Calculated from current SQLite inventory, sales, supplier, promotion and purchase-order records at {receiptData.agent_analysis.last_analyzed_at ? new Date(receiptData.agent_analysis.last_analyzed_at).toLocaleTimeString() : "checkout"}.</p></div><button className="btn primary" onClick={() => navigate("/")}>View Command Center <ArrowRight size={14}/></button></div>
+          <div className="pos-section-head"><div><p className="eyebrow">After-sale system check</p><h3>VoltPilot re-analysed the seven risk areas</h3><p className="muted">Calculated from current inventory, sales, supplier, promotion and purchase-order records at {receiptData.agent_analysis.last_analyzed_at ? new Date(receiptData.agent_analysis.last_analyzed_at).toLocaleTimeString() : "checkout"}.</p></div><button className="btn primary" onClick={() => navigate("/")}>View Command Center <ArrowRight size={14}/></button></div>
           <div className="pos-agent-risk-grid">{(receiptData.agent_analysis.items || []).map((area) => <button type="button" className="pos-agent-risk" key={area.id} onClick={() => navigate(`/risk-areas/${area.id}`)}>
             <span className="pos-agent-risk-number">{area.number}</span><strong>{area.title}</strong><span className={`risk-area-state ${area.status === "needs_data" ? "needs-data" : area.status === "active" ? "active" : "clear"}`}>{area.status === "needs_data" ? "Needs data" : area.status === "active" ? `${area.issue_count} finding${area.issue_count === 1 ? "" : "s"}` : "No current findings"}</span><small>Open analysis <ArrowRight size={12}/></small>
           </button>)}</div>
@@ -236,11 +271,33 @@ export default function StorePOS() {
     );
   }
 
+  if (!saleId && !loading && stores.length === 0) {
+    return (
+      <div className="page pos-page">
+        <div className="topbar"><div><p className="eyebrow">Retail setup</p><h2 className="page-title">Create your first store</h2><p className="sub">VoltPilot starts with an empty business database. Enter your real store details, then add products and opening stock.</p></div></div>
+        {error ? <div className="err-banner pos-message"><AlertCircle size={17} />{error}</div> : null}
+        {notice ? <div className="ok-banner pos-message"><CheckCircle2 size={17} />{notice}</div> : null}
+        <section className="card pos-inline-panel">
+          <div className="pos-inline-panel-head"><div><h3>Store details</h3><p className="muted">A store is a location, not product or stock data. No sample records will be created.</p></div><Store size={22} /></div>
+          <form onSubmit={submitNewStore}>
+            <div className="pos-admin-form-grid">
+              <label className="pos-admin-field"><span>Store code <b>*</b></span><input required minLength={2} maxLength={12} pattern="[A-Za-z0-9_-]+" value={newStore.code} onChange={(e) => setNewStore({ ...newStore, code: e.target.value.toUpperCase() })} placeholder="e.g. BLR01" /><small>Short unique code used in reports/imports.</small></label>
+              <label className="pos-admin-field"><span>Store name <b>*</b></span><input required minLength={2} maxLength={140} value={newStore.name} onChange={(e) => setNewStore({ ...newStore, name: e.target.value })} placeholder="e.g. VoltKart Bengaluru Central" /></label>
+              <label className="pos-admin-field"><span>City <b>*</b></span><input required minLength={2} maxLength={80} value={newStore.city} onChange={(e) => setNewStore({ ...newStore, city: e.target.value })} placeholder="Bengaluru" /></label>
+              <label className="pos-admin-field"><span>Region <b>*</b></span><input required minLength={2} maxLength={80} value={newStore.region} onChange={(e) => setNewStore({ ...newStore, region: e.target.value })} placeholder="South" /></label>
+            </div>
+            <div className="pos-inline-panel-footer"><p>This saves only the store record. Products and stock are added separately so the database reflects what the retailer actually enters.</p><button className="btn primary" type="submit" disabled={savingStore}>{savingStore ? "Creating store…" : "Create store & continue"}</button></div>
+          </form>
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="page pos-page">
-      <div className="topbar"><div><p className="eyebrow">Retail operations / point of sale</p><h2 className="page-title">Store &amp; Product Vault</h2><p className="sub">Browse stock, prepare a bill, record a simulated sale and feed the operational data back into VoltPilot.</p></div><div className="pos-store-select"><label htmlFor="pos-store">Selling from</label><select id="pos-store" value={storeId} onChange={(event) => changeStore(event.target.value)}>{stores.map((store) => <option key={store.id} value={store.id}>{store.name}</option>)}</select></div></div>
+      <div className="topbar"><div><p className="eyebrow">Retail operations / point of sale</p><h2 className="page-title">Store &amp; Product Vault</h2><p className="sub">Browse stock, prepare a bill, record a simulated sale and feed the operational data back into VoltPilot.</p></div>{stores.length ? <div className="pos-store-select"><label htmlFor="pos-store">Selling from</label><select id="pos-store" value={storeId ?? ""} onChange={(event) => changeStore(event.target.value)}>{stores.map((store) => <option key={store.id} value={store.id}>{store.name}</option>)}</select></div> : null}</div>
 
-      <div className="pos-demo-note"><Store size={16} /><span><strong>Demo POS</strong> — products and opening stock are sample data. Checkout updates SQLite inventory, sales history and VoltPilot recommendations. Payment is simulated.</span></div>
+      <div className="pos-demo-note"><Store size={16} /><span><strong>Retail operations</strong> — the catalog and quantities come from records entered by your team. Checkout records a simulated sale; no real payment is processed.</span></div>
 
       <div className="pos-stagebar">
         <StageButton number="01" title="Product vault" active={step === "vault"} onClick={() => setStep("vault")} />
@@ -270,7 +327,7 @@ export default function StorePOS() {
                     <label className="pos-admin-field"><span>Opening stock at selected store</span><input required type="number" min="0" max="100000" step="1" value={newProduct.initial_stock} onChange={(e) => setNewProduct({ ...newProduct, initial_stock: e.target.value })} /><small>Enter 0 if the SKU is listed but stock has not arrived yet.</small></label>
                     <label className="pos-admin-field pos-admin-field-wide"><span>Stock note</span><input maxLength={400} value={newProduct.note} onChange={(e) => setNewProduct({ ...newProduct, note: e.target.value })} placeholder="Opening stock source / note" /></label>
                   </div>
-                  <div className="pos-inline-panel-footer"><p>Data is saved to SQLite and pending VoltPilot recommendations are refreshed. Product creation does not invent sales history.</p><button className="btn primary" type="submit" disabled={savingProduct}>{savingProduct ? "Saving product…" : "Save product & stock"}</button></div>
+                  <div className="pos-inline-panel-footer"><p>Data is saved to the connected database and pending VoltPilot recommendations are refreshed. Product creation does not invent sales history.</p><button className="btn primary" type="submit" disabled={savingProduct}>{savingProduct ? "Saving product…" : "Save product & stock"}</button></div>
                 </form>
               ) : null}
               {restockProduct ? (
@@ -326,10 +383,10 @@ export default function StorePOS() {
         </div>
       ) : (
         <section className="card pos-sold-panel"><div className="pos-section-head"><div><h3>Completed sales</h3><p className="muted">Saved bills for the selected store. Open any receipt to review the recorded sale.</p></div><button className="btn" onClick={reloadStore}><Receipt size={15} /> Refresh list</button></div>
-          {loading ? <p className="muted">Loading sales…</p> : recentSales.length ? <div className="table-wrap"><table className="pos-table"><thead><tr><th>Invoice</th><th>Recorded at</th><th>Units</th><th>Payment</th><th>Total</th><th>Status</th><th></th></tr></thead><tbody>{recentSales.map((sale) => <tr key={sale.id}><td><strong>{sale.invoice_number}</strong></td><td>{new Date(sale.created_at).toLocaleString()}</td><td>{sale.units_sold}</td><td>{String(sale.payment_method).toUpperCase()} · demo</td><td><strong>{inr(sale.total_amount)}</strong></td><td><span className="pos-sold-label"><CheckCircle2 size={13} /> {sale.status}</span></td><td><button className="btn" onClick={() => navigate(`/store/receipt/${sale.id}`)}>View receipt</button></td></tr>)}</tbody></table></div> : <div className="pos-empty"><Receipt size={24} /><h4>No completed sales yet</h4><p>Make a demo sale from the Product Vault; it will appear here after checkout.</p><button className="btn primary" onClick={() => setStep("vault")}>Open product vault</button></div>}
+          {loading ? <p className="muted">Loading sales…</p> : recentSales.length ? <div className="table-wrap"><table className="pos-table"><thead><tr><th>Invoice</th><th>Recorded at</th><th>Units</th><th>Payment</th><th>Total</th><th>Status</th><th></th></tr></thead><tbody>{recentSales.map((sale) => <tr key={sale.id}><td><strong>{sale.invoice_number}</strong></td><td>{new Date(sale.created_at).toLocaleString()}</td><td>{sale.units_sold}</td><td>{String(sale.payment_method).toUpperCase()} · demo</td><td><strong>{inr(sale.total_amount)}</strong></td><td><span className="pos-sold-label"><CheckCircle2 size={13} /> {sale.status}</span></td><td><button className="btn" onClick={() => navigate(`/store/receipt/${sale.id}`)}>View receipt</button></td></tr>)}</tbody></table></div> : <div className="pos-empty"><Receipt size={24} /><h4>No completed sales yet</h4><p>Record a sale from the Product Vault; it will appear here after checkout.</p><button className="btn primary" onClick={() => setStep("vault")}>Open product vault</button></div>}
         </section>
       )}
-      <p className="pos-page-footnote">Store demo date: {storeData.demo_date || "—"}. Product catalog, checkout, on-hand stock, daily sales history and recent sale records are served by the FastAPI backend and stored in SQLite.</p>
+      <p className="pos-page-footnote">Business date: {storeData.demo_date || "—"}. Product catalog, checkout, on-hand stock, daily sales history and sale records are served by the FastAPI backend and stored in the connected database.</p>
     </div>
   );
 }

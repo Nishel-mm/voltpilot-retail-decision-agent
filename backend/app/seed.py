@@ -4,13 +4,13 @@ Product names that appear on https://volttkart.shop/ are used where they fit.
 The 55-inch Smart TV scenario comes from the hackathon brief, not the public shop.
 """
 
-from datetime import date, timedelta
+from datetime import timedelta
 
-from .config import DEFAULT_ASSUMPTIONS, DEMO_TODAY
+from .config import DEFAULT_ASSUMPTIONS, business_date
 from .database import connect, init_schema
 
 
-TODAY = date.fromisoformat(DEMO_TODAY)
+TODAY = business_date()
 
 
 def _wipe(conn) -> None:
@@ -18,6 +18,7 @@ def _wipe(conn) -> None:
         # POS rows must be removed before their referenced product/store rows.
         "retail_transaction_items",
         "retail_transactions",
+        "inventory_movements",
         "audit_log",
         "recommendations",
         "supplier_delivery_updates",
@@ -32,10 +33,14 @@ def _wipe(conn) -> None:
         "stores",
         "app_settings",
     ]
-    conn.execute("PRAGMA foreign_keys = OFF")
-    for table in tables:
-        conn.execute(f"DROP TABLE IF EXISTS {table}")
-    conn.execute("PRAGMA foreign_keys = ON")
+    if getattr(conn, "is_postgres", False):
+        for table in tables:
+            conn.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
+    else:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        for table in tables:
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+        conn.execute("PRAGMA foreign_keys = ON")
     init_schema(conn)
 
 
@@ -46,7 +51,7 @@ def _insert_sales(conn, product_id: int, store_id: int, daily_units: float, days
     leftover = round((daily_units - base) * days)
     for i in range(days):
         units = base + (1 if i < leftover else 0)
-        sale_date = TODAY - timedelta(days=days - i)
+        sale_date = TODAY - timedelta(days=days - 1 - i)
         conn.execute(
             """
             INSERT INTO sales_daily (product_id, store_id, sale_date, units)

@@ -3,11 +3,12 @@ from datetime import date, datetime, timezone
 import json
 from fastapi.middleware.cors import CORSMiddleware
 
-from .config import DEMO_TODAY, FRONTEND_ORIGINS
+from .config import (DATABASE_URL, USE_POSTGRES, FRONTEND_ORIGINS, DEFAULT_ASSUMPTIONS, AUTO_SEED_DEMO, ALLOW_DEMO_RESET, business_date)
 from .database import get_conn, init_schema
-from .schemas import DecisionAction, HealthResponse, InventoryStockReceipt, StoreProductCreate, SupplierDeliveryUpdate, StoreCheckout
+from .schemas import DecisionAction, HealthResponse, InventoryStockReceipt, StoreProductCreate, SupplierDeliveryUpdate, StoreCheckout, StoreCreate
 from .seed import seed
 from .services import engine, executor, forecasting, risk_areas, storefront
+from .services.initial_store_setup import bootstrap_store_catalog
 from .services.metrics import assumption_records, get_assumptions, sales_velocity, stock_cover_days
 
 
@@ -31,16 +32,42 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def startup() -> None:
+        """Initialize schema/settings without seeding production PostgreSQL with demo retail data."""
         with get_conn() as conn:
             init_schema(conn)
-            products = conn.execute("SELECT COUNT(*) AS c FROM products").fetchone()["c"]
-            if products == 0:
-                seed(conn)
-            # Add POS-only demo SKUs idempotently to both fresh and existing databases.
-            # Existing inventory/transaction data is never overwritten.
-            catalog_changed = storefront.ensure_store_catalog(conn)
-            if catalog_changed or conn.execute("SELECT COUNT(*) AS c FROM recommendations").fetchone()["c"] == 0:
-                engine.refresh(conn)
+            # Configurable assumptions are application settings, not retailer/business data.
+            for key, meta in DEFAULT_ASSUMPTIONS.items():
+                existing = conn.execute("SELECT key FROM app_settings WHERE key = ?", (key,)).fetchone()
+                if not existing:
+                    conn.execute(
+                        "INSERT INTO app_settings (key, value, description, source) VALUES (?, ?, ?, ?)",
+                        (key, meta["value"], meta["description"], "configurable_assumption"),
+                    )
+
+            stores_count = int(conn.execute("SELECT COUNT(*) AS c FROM stores").fetchone()["c"])
+            products_count = int(conn.execute("SELECT COUNT(*) AS c FROM products").fetchone()["c"])
+            # A new database gets only the familiar store/product catalogue and
+            # opening quantities. Synthetic sales, suppliers, promotions, POs and
+            # recommendations are never generated on startup by default.
+            if stores_count == 0 and products_count == 0:
+                if AUTO_SEED_DEMO and not USE_POSTGRES:
+                    # Explicit local-only opt-in for the legacy hackathon scenario.
+                    seed(conn)
+                    stores_count = int(conn.execute("SELECT COUNT(*) AS c FROM stores").fetchone()["c"])
+                    products_count = int(conn.execute("SELECT COUNT(*) AS c FROM products").fetchone()["c"])
+                else:
+                    bootstrap_store_catalog(conn)
+                    stores_count = int(conn.execute("SELECT COUNT(*) AS c FROM stores").fetchone()["c"])
+                    products_count = int(conn.execute("SELECT COUNT(*) AS c FROM products").fetchone()["c"])
+
+            if stores_count > 0 and products_count > 0:
+                # Do not generate recommendations from opening quantities alone.
+                # Refresh only after business/observed data has actually been entered.
+                analytical_count = 0
+                for table in ("sales_history_observations", "retail_transactions", "suppliers", "supplier_catalog", "promotions", "purchase_orders"):
+                    analytical_count += int(conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"])
+                if analytical_count > 0:
+                    engine.refresh(conn)
 
     @app.get("/api/health", response_model=HealthResponse)
     def health():
@@ -49,8 +76,8 @@ def create_app() -> FastAPI:
         return HealthResponse(
             status="ok",
             service="VoltPilot",
-            today=DEMO_TODAY,
-            database="sqlite",
+            today=business_date().isoformat(),
+            database="postgresql" if USE_POSTGRES else "sqlite",
         )
 
     @app.get("/api/assumptions")
@@ -77,6 +104,41 @@ def create_app() -> FastAPI:
         if not rec:
             raise HTTPException(404, "Decision not found.")
         return rec
+
+    @app.get("/api/stores")
+    def list_stores():
+        with get_conn() as conn:
+            rows = conn.execute("SELECT * FROM stores ORDER BY name").fetchall()
+            return {"items": [dict(row) for row in rows], "count": len(rows)}
+
+    @app.post("/api/stores")
+    def create_store(body: StoreCreate):
+        code = body.code.strip().upper()
+        name = body.name.strip()
+        city = body.city.strip()
+        region = body.region.strip()
+        if not all((code, name, city, region)):
+            raise HTTPException(422, "Store code, name, city and region are required.")
+        with get_conn() as conn:
+            duplicate = conn.execute("SELECT id FROM stores WHERE UPPER(code) = UPPER(?)", (code,)).fetchone()
+            if duplicate:
+                raise HTTPException(409, f"Store code {code} already exists.")
+            cursor = conn.execute(
+                "INSERT INTO stores (code, name, city, region) VALUES (?, ?, ?, ?) RETURNING id",
+                (code, name, city, region),
+            )
+            store_id = int(cursor.fetchone()["id"])
+            timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+            details = json.dumps({"store_id": store_id, "code": code, "name": name, "city": city, "region": region})
+            conn.execute(
+                """INSERT INTO audit_log (recommendation_id, decision, option_id, option_type, actor, timestamp, summary, result, details_json, executed)
+                   VALUES (NULL, 'store_created', ?, 'store_setup', 'Store Manager', ?, ?, ?, ?, 1)""",
+                (code, timestamp, f"Store created: {name}", "Store location created; no products or stock were invented.", details),
+            )
+            if int(conn.execute("SELECT COUNT(*) AS c FROM products").fetchone()["c"]) > 0:
+                engine.refresh(conn)
+            row = conn.execute("SELECT * FROM stores WHERE id = ?", (store_id,)).fetchone()
+            return {"ok": True, "store": dict(row), "message": f"Store {name} created. Add products and opening stock when ready."}
 
     @app.get("/api/inventory")
     def inventory():
@@ -153,7 +215,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/orders/{order_id}/supplier-update")
     def submit_supplier_update(order_id: int, body: SupplierDeliveryUpdate):
-        """Record a vendor delivery status/ETA update in SQLite.
+        """Record a vendor delivery status/ETA update in the configured database.
 
         This is a local hackathon simulation, not a real authenticated supplier portal.
         It does not mark inventory as received or contact the named supplier.
@@ -251,7 +313,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/store/products")
     def create_store_product(body: StoreProductCreate):
-        """Add a new catalog SKU and its opening stock, using the same SQLite source of truth as VoltPilot analysis."""
+        """Add a new catalog SKU and its opening stock, using the same database as VoltPilot analysis."""
         with get_conn() as conn:
             return storefront.create_store_product(conn, body)
 
@@ -360,11 +422,13 @@ def create_app() -> FastAPI:
 
     @app.post("/api/reset")
     def reset():
+        if USE_POSTGRES or not ALLOW_DEMO_RESET:
+            raise HTTPException(403, "Demo reset is disabled for the live/real-data workspace. No data was changed.")
         with get_conn() as conn:
             seed(conn)
             storefront.ensure_store_catalog(conn)
             engine.refresh(conn)
-        return {"ok": True, "message": "Demo data reset to 9 Oct 2026 festival snapshot, including Store & POS catalog."}
+        return {"ok": True, "message": "Local demo data reset. This action is not available on the live PostgreSQL workspace."}
 
     return app
 

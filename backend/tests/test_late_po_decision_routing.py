@@ -11,11 +11,15 @@ os.environ["VOLTPILOT_DB"] = str(ROOT / "data" / f"test_late_po_{uuid.uuid4().he
 from fastapi.testclient import TestClient
 from app.main import app
 from app.database import get_conn
+from app.seed import seed
 
 
 def test_overdue_open_po_gets_expedite_option_even_if_status_not_delayed():
     with TestClient(app) as client:
+        # This test requires a known overdue-PO scenario. Seed it explicitly for
+        # this test only; normal application startup remains free of demo history.
         with get_conn() as conn:
+            seed(conn)
             po = conn.execute("SELECT * FROM purchase_orders WHERE po_number = 'PO-88421'").fetchone()
             assert po is not None
             conn.execute(

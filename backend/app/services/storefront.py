@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
-from ..config import DEMO_TODAY
+from ..config import DEMO_TODAY, business_date
 
 TODAY = date.fromisoformat(DEMO_TODAY)
 
@@ -85,10 +85,10 @@ def ensure_store_catalog(conn) -> bool:
             product_id = int(row["id"])
         else:
             cur = conn.execute(
-                "INSERT INTO products (sku, name, category, unit_cost, selling_price) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO products (sku, name, category, unit_cost, selling_price) VALUES (?, ?, ?, ?, ?) RETURNING id",
                 (item["sku"], item["name"], item["category"], item["unit_cost"], item["selling_price"]),
             )
-            product_id = int(cur.lastrowid)
+            product_id = int(cur.fetchone()["id"])
             changed = True
 
         for store in stores:
@@ -158,15 +158,15 @@ def create_store_product(conn, body) -> dict:
         raise HTTPException(422, "SKU, product name and category are required.")
     if float(body.selling_price) <= 0 or float(body.unit_cost) < 0:
         raise HTTPException(422, "Selling price must be positive and unit cost cannot be negative.")
-    duplicate = conn.execute("SELECT id, name FROM products WHERE sku = ? COLLATE NOCASE", (sku,)).fetchone()
+    duplicate = conn.execute("SELECT id, name FROM products WHERE UPPER(sku) = UPPER(?)", (sku,)).fetchone()
     if duplicate:
         raise HTTPException(409, f"SKU {sku} already exists for {duplicate['name']}. Use Receive stock to add inventory for an existing SKU.")
 
     cursor = conn.execute(
-        "INSERT INTO products (sku, name, category, unit_cost, selling_price) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO products (sku, name, category, unit_cost, selling_price) VALUES (?, ?, ?, ?, ?) RETURNING id",
         (sku, name, category, round(float(body.unit_cost), 2), round(float(body.selling_price), 2)),
     )
-    product_id = int(cursor.lastrowid)
+    product_id = int(cursor.fetchone()["id"])
     timestamp = _local_timestamp()
     # Create inventory only at the selected store. Other stores are not silently
     # marked out of stock for a SKU they may not carry; Receive stock can add the
@@ -174,7 +174,7 @@ def create_store_product(conn, body) -> dict:
     quantity = int(body.initial_stock)
     conn.execute(
         "INSERT INTO inventory (product_id, store_id, quantity, days_on_hand, last_counted_at, markdown_review) VALUES (?, ?, ?, 0, ?, 0)",
-        (product_id, int(body.store_id), quantity, DEMO_TODAY),
+        (product_id, int(body.store_id), quantity, business_date().isoformat()),
     )
     status, label = _stock_status(quantity)
     store_quantities = [{"store_id": int(body.store_id), "quantity": quantity, "stock_status": status, "stock_status_label": label}]
@@ -195,13 +195,13 @@ def create_store_product(conn, body) -> dict:
         """INSERT INTO audit_log (recommendation_id, decision, option_id, option_type, actor, timestamp, summary, result, details_json, executed)
            VALUES (NULL, 'product_created', ?, 'catalog_product', 'Store Manager', ?, ?, ?, ?, 1)""",
         (sku, timestamp, f"New product added: {name} ({sku})",
-         f"Product saved to SQLite with opening stock of {int(body.initial_stock)} at {store['name']}; other stores are not marked as carrying this SKU until stock is received there.", json.dumps(details)),
+         f"Product saved to the connected database with opening stock of {int(body.initial_stock)} at {store['name']}; other stores are not marked as carrying this SKU until stock is received there.", json.dumps(details)),
     )
     # Refresh the actual decision engine against the same database the store uses.
     from . import engine
     engine.refresh(conn)
     status, label = _stock_status(int(body.initial_stock))
-    return {"ok": True, "product": {"id": product_id, "product_id": product_id, "sku": sku, "name": name, "category": category, "unit_cost": round(float(body.unit_cost), 2), "selling_price": round(float(body.selling_price), 2), "available_qty": int(body.initial_stock), "stock_status": status, "stock_status_label": label}, "stock_by_store": store_quantities, "recommendations_refreshed": True, "message": f"{name} was added to the product catalog at {store['name']} and saved in SQLite."}
+    return {"ok": True, "product": {"id": product_id, "product_id": product_id, "sku": sku, "name": name, "category": category, "unit_cost": round(float(body.unit_cost), 2), "selling_price": round(float(body.selling_price), 2), "available_qty": int(body.initial_stock), "stock_status": status, "stock_status_label": label}, "stock_by_store": store_quantities, "recommendations_refreshed": True, "message": f"{name} was added to the product catalog at {store['name']} and saved in the connected database."}
 
 
 def receive_store_stock(conn, body) -> dict:
@@ -219,7 +219,7 @@ def receive_store_stock(conn, body) -> dict:
     if inventory is None:
         conn.execute(
             "INSERT INTO inventory (product_id, store_id, quantity, days_on_hand, last_counted_at, markdown_review) VALUES (?, ?, 0, 0, ?, 0)",
-            (body.product_id, body.store_id, DEMO_TODAY),
+            (body.product_id, body.store_id, business_date().isoformat()),
         )
         previous = 0
     else:
@@ -232,9 +232,9 @@ def receive_store_stock(conn, body) -> dict:
     note = (body.note or "Stock received at store").strip()[:400]
     conn.execute(
         "UPDATE inventory SET quantity = ?, last_counted_at = ? WHERE product_id = ? AND store_id = ?",
-        (after, DEMO_TODAY, body.product_id, body.store_id),
+        (after, business_date().isoformat(), body.product_id, body.store_id),
     )
-    reference = f"RCV-{DEMO_TODAY.replace('-', '')}-{body.product_id}-{body.store_id}-{timestamp[-8:].replace(':', '')}"
+    reference = f"RCV-{business_date().strftime('%Y%m%d')}-{body.product_id}-{body.store_id}-{timestamp[-8:].replace(':', '')}"
     conn.execute(
         """INSERT INTO inventory_movements (product_id, store_id, movement_type, quantity_delta, quantity_after, reference_type, reference_id, note, actor, created_at)
            VALUES (?, ?, 'stock_receipt', ?, ?, 'stock_receipt', ?, ?, 'Store Manager', ?)""",
@@ -270,7 +270,7 @@ def list_inventory_movements(conn, store_id: int | None = None, product_id: int 
     if where: sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY im.id DESC LIMIT ?"
     params.append(max(1, min(int(limit), 500)))
-    return {"items": [dict(r) for r in conn.execute(sql, params).fetchall()], "count_note": "Stock movements are persisted in SQLite; quantities are derived from the inventory table."}
+    return {"items": [dict(r) for r in conn.execute(sql, params).fetchall()], "count_note": "Stock movements are persisted in the configured database; quantities are derived from the inventory table."}
 
 
 def catalog_payload(conn, store_id: int) -> dict:
@@ -278,9 +278,15 @@ def catalog_payload(conn, store_id: int) -> dict:
     from .metrics import get_assumptions, sales_velocity, stock_cover_days
 
     stores = [dict(r) for r in conn.execute("SELECT * FROM stores ORDER BY name").fetchall()]
-    selected_store = next((row for row in stores if row["id"] == store_id), None)
+    if not stores:
+        return {
+            "store": None, "stores": [], "categories": [], "items": [],
+            "business_date": business_date().isoformat(), "demo_tax_rate": 0.18,
+            "data_origin": "No retailer data has been entered yet. Create a store to begin.",
+        }
+    selected_store = next((row for row in stores if int(row["id"]) == int(store_id)), None)
     if selected_store is None:
-        raise HTTPException(404, "Store not found.")
+        raise HTTPException(404, "Store not found. Choose an existing store.")
 
     lookback = int(get_assumptions(conn).get("velocity_lookback_days", 14))
     rows = conn.execute(
@@ -310,9 +316,11 @@ def catalog_payload(conn, store_id: int) -> dict:
         "stores": stores,
         "categories": categories,
         "items": items,
-        "demo_date": DEMO_TODAY,
+        "demo_date": business_date().isoformat(),
+        "business_date": business_date().isoformat(),
         "demo_tax_rate": 0.18,
-        "demo_note": "Synthetic store/catalog data. Checkout is simulated; no payment is taken. The 18% tax line is illustrative and is not a statutory tax invoice.",
+        "demo_note": "Catalog and quantities come from retailer-entered data. Checkout is simulated; no payment is taken. The 18% tax line is illustrative and is not a statutory tax invoice.",
+        "data_origin": "Current database records; no sample product is added automatically to hosted PostgreSQL.",
     }
 
 
@@ -338,7 +346,7 @@ def list_sales(conn, store_id: int | None = None, limit: int = 50) -> dict:
     if store_id is not None and not conn.execute("SELECT id FROM stores WHERE id = ?", (store_id,)).fetchone():
         from fastapi import HTTPException
         raise HTTPException(404, "Store not found.")
-    return {"items": _sale_summary_rows(conn, store_id, limit), "demo_note": "Simulated point-of-sale transactions stored locally in SQLite."}
+    return {"items": _sale_summary_rows(conn, store_id, limit), "demo_note": "Simulated point-of-sale transactions stored in the configured database. No real payment was processed."}
 
 
 def sale_detail(conn, sale_id: int) -> dict | None:
@@ -422,7 +430,7 @@ def complete_checkout(conn, body) -> dict:
     tax_rate = 0.18  # visibly labelled demo estimate only; not a tax-compliance calculation
     tax_amount = round(subtotal * tax_rate, 2)
     total_amount = round(subtotal + tax_amount, 2)
-    invoice_number = f"VK-{DEMO_TODAY.replace('-', '')}-{uuid4().hex[:6].upper()}"
+    invoice_number = f"VK-{business_date().strftime('%Y%m%d')}-{uuid4().hex[:6].upper()}"
     created_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     customer_name = (body.customer_name or "").strip()[:100]
     payment_method = body.payment_method
@@ -432,11 +440,11 @@ def complete_checkout(conn, body) -> dict:
         """INSERT INTO retail_transactions (
                invoice_number, store_id, customer_name, payment_method, subtotal,
                tax_rate, tax_amount, total_amount, status, created_at, simulated
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sold', ?, 1)""",
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sold', ?, 1) RETURNING id""",
         (invoice_number, body.store_id, customer_name, payment_method, subtotal,
          tax_rate, tax_amount, total_amount, created_at),
     )
-    sale_id = int(cur.lastrowid)
+    sale_id = int(cur.fetchone()["id"])
 
     for line in lines:
         upd = conn.execute(
@@ -463,19 +471,20 @@ def complete_checkout(conn, body) -> dict:
             (sale_id, line["product_id"], line["quantity"], line["unit_price"], line["unit_cost"], line["line_total"]),
         )
 
-        # Update daily demand history so the seven risk detectors and forecasting inputs
-        # can see the POS sale. DEMO_TODAY is fixed by the reproducible demo snapshot.
+        # POS observations use the actual business date so the live risk engine
+        # and observed-data forecaster can learn from real entered transactions.
+        sale_business_date = business_date().isoformat()
         existing = conn.execute(
             """SELECT id FROM sales_daily WHERE product_id = ? AND store_id = ? AND sale_date = ?
                ORDER BY id DESC LIMIT 1""",
-            (line["product_id"], body.store_id, DEMO_TODAY),
+            (line["product_id"], body.store_id, sale_business_date),
         ).fetchone()
         if existing:
             conn.execute("UPDATE sales_daily SET units = units + ? WHERE id = ?", (line["quantity"], existing["id"]))
         else:
             conn.execute(
                 "INSERT INTO sales_daily (product_id, store_id, sale_date, units) VALUES (?, ?, ?, ?)",
-                (line["product_id"], body.store_id, DEMO_TODAY, line["quantity"]),
+                (line["product_id"], body.store_id, sale_business_date, line["quantity"]),
             )
 
     details = {
@@ -519,6 +528,6 @@ def complete_checkout(conn, body) -> dict:
                       for area in risk_snapshot["items"]],
             "data_origin": risk_snapshot["data_origin"],
         },
-        "message": "Sale saved. Inventory, sales history, and current risk analysis were updated from SQLite; payment is simulated.",
+        "message": "Sale saved. Inventory, sales history, and current risk analysis were updated from the connected database; payment is simulated.",
         "demo_note": "18% tax is an illustrative demo estimate only, not a statutory tax invoice. No real payment was taken.",
     }

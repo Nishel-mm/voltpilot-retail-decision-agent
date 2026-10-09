@@ -1,43 +1,42 @@
-import os
-import sys
-from pathlib import Path
+"""API smoke tests for the empty-analytics startup policy.
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-os.environ["VOLTPILOT_DB"] = str(ROOT / "data" / "test_voltpilot.db")
-
+The store catalogue/opening stock may be initialized on first launch, but the
+API must not invent sales history, recommendations, supplier records, POs, or
+historical audit activity just to make the dashboard appear busy.
+"""
 from fastapi.testclient import TestClient
 from app.main import app
-from app.database import connect
-from app.seed import seed
-from app.services import engine
-
-
-def setup_module():
-    conn = connect()
-    seed(conn)
-    engine.refresh(conn)
-    conn.close()
-
-
-client = TestClient(app)
 
 
 def test_health():
-    res = client.get("/api/health")
-    assert res.status_code == 200
-    assert res.json()["status"] == "ok"
+    with TestClient(app) as client:
+        response = client.get("/api/health")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "ok"
+        assert body["service"] == "VoltPilot"
 
 
 def test_dashboard_and_recommendations():
-    dash = client.get("/api/dashboard")
-    assert dash.status_code == 200
-    assert dash.json()["kpis"]["attention_items"] >= 1
-    recs = client.get("/api/recommendations")
-    assert recs.status_code == 200
-    assert len(recs.json()["items"]) >= 1
+    # Using TestClient as a context manager runs FastAPI startup so schema setup
+    # completes before the request. The test DB is unique per test via conftest.
+    with TestClient(app) as client:
+        dashboard = client.get("/api/dashboard")
+        assert dashboard.status_code == 200, dashboard.text
+        kpis = dashboard.json()["kpis"]
+        assert kpis["attention_items"] == 0
+        assert kpis["critical_or_high"] == 0
+        assert kpis["delayed_pos"] == 0
+        assert kpis["actions_logged"] == 0
+        # Starter catalogue/opening-stock setup is permitted; it is not sales data.
+        assert kpis["units_on_hand"] > 0
+
+        recommendations = client.get("/api/recommendations")
+        assert recommendations.status_code == 200, recommendations.text
+        assert recommendations.json()["items"] == []
 
 
 def test_invalid_decision():
-    res = client.post("/api/actions/99999/approve", json={})
-    assert res.status_code == 404
+    with TestClient(app) as client:
+        response = client.post("/api/actions/99999/approve", json={})
+        assert response.status_code == 404, response.text

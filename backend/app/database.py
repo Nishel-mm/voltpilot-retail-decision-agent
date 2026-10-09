@@ -1,8 +1,11 @@
+import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
-from .config import DATA_DIR, DB_PATH
+from .config import DATA_DIR, DB_PATH, DATABASE_URL, USE_POSTGRES
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -206,13 +209,106 @@ CREATE INDEX IF NOT EXISTS idx_retail_items_transaction
 """
 
 
+class HybridRow(dict):
+    """Dictionary-style row that also supports SQLite-style numeric indexes."""
+    def __init__(self, names, values):
+        self._values = tuple(values)
+        super().__init__(zip(names, self._values))
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._values[key]
+        return super().__getitem__(key)
+
+
+def _hybrid_row_factory(cursor):
+    names = [column.name for column in (cursor.description or [])]
+    return lambda values: HybridRow(names, values)
+
+
+class _NoopCursor:
+    rowcount = 0
+
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+
+class PostgresConnection:
+    """Small sqlite-compatible adapter for the SQL used by this application.
+
+    It preserves the existing `conn.execute(..., qmark placeholders ...)` API
+    while using psycopg/PostgreSQL in production. SQLite remains the local default.
+    """
+    is_postgres = True
+
+    def __init__(self, connection):
+        self._connection = connection
+
+    @staticmethod
+    def _sql(query: str) -> str:
+        return query.replace("?", "%s")
+
+    def execute(self, query: str, params=()):
+        if query.lstrip().upper().startswith("PRAGMA"):
+            return _NoopCursor()
+        cursor = self._connection.cursor()
+        cursor.execute(self._sql(query), params or ())
+        return cursor
+
+    def executemany(self, query: str, seq_of_params):
+        cursor = self._connection.cursor()
+        cursor.executemany(self._sql(query), seq_of_params)
+        return cursor
+
+    def executescript(self, script: str):
+        for statement in _sql_statements(script):
+            self.execute(statement)
+
+    def commit(self):
+        self._connection.commit()
+
+    def rollback(self):
+        self._connection.rollback()
+
+    def close(self):
+        self._connection.close()
+
+
+def _sql_statements(script: str) -> list[str]:
+    without_comments = re.sub(r"(?m)^\s*--.*$", "", script)
+    return [part.strip() for part in without_comments.split(";") if part.strip()]
+
+
+def _postgres_schema(script: str) -> str:
+    """Convert simple SQLite DDL to equivalent PostgreSQL DDL."""
+    script = re.sub(r"(?m)^\s*PRAGMA\s+foreign_keys\s*=\s*ON\s*;?\s*$", "", script, flags=re.IGNORECASE)
+    script = re.sub(r"\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b", "BIGSERIAL PRIMARY KEY", script, flags=re.IGNORECASE)
+    script = re.sub(r"\bINTEGER\b", "BIGINT", script, flags=re.IGNORECASE)
+    script = re.sub(r"\bREAL\b", "DOUBLE PRECISION", script, flags=re.IGNORECASE)
+    return script
+
+
 def ensure_data_dir() -> None:
     Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
 
 
-def connect() -> sqlite3.Connection:
-    ensure_data_dir()
-    conn = sqlite3.connect(DB_PATH)
+def connect():
+    if USE_POSTGRES:
+        try:
+            import psycopg
+        except ImportError as exc:
+            raise RuntimeError("PostgreSQL support requires psycopg. Install backend requirements.") from exc
+        connection = psycopg.connect(DATABASE_URL, row_factory=_hybrid_row_factory, connect_timeout=10)
+        return PostgresConnection(connection)
+
+    # Read the override at connection time. This also lets pytest isolate each
+    # test database even though app modules were imported during collection.
+    db_path = Path(os.environ.get("VOLTPILOT_DB", str(DB_PATH)))
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -231,11 +327,15 @@ def get_conn():
         conn.close()
 
 
-def init_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(SCHEMA)
+def init_schema(conn) -> None:
+    if getattr(conn, "is_postgres", False):
+        for statement in _sql_statements(_postgres_schema(SCHEMA)):
+            conn.execute(statement)
+    else:
+        conn.executescript(SCHEMA)
 
 
-def row_to_dict(row: sqlite3.Row | None) -> dict | None:
+def row_to_dict(row: Any | None) -> dict | None:
     if row is None:
         return None
     return dict(row)

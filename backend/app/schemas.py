@@ -60,3 +60,11 @@ class InventoryStockReceipt(BaseModel):
     product_id: int = Field(gt=0)
     quantity: int = Field(gt=0, le=100000)
     note: str = Field(default="Stock received at store", max_length=400)
+
+
+class StoreCreate(BaseModel):
+    """Create a real store/location in the retailer's workspace."""
+    code: str = Field(min_length=2, max_length=12, pattern=r"^[A-Za-z0-9_-]+$")
+    name: str = Field(min_length=2, max_length=140)
+    city: str = Field(min_length=2, max_length=80)
+    region: str = Field(min_length=2, max_length=80)

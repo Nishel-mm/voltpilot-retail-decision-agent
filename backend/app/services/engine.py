@@ -19,7 +19,8 @@ AND does not push the source store below min_safe_cover_days.
 from __future__ import annotations
 
 import json
-from ..config import DEMO_TODAY
+from datetime import datetime, timezone
+from ..config import business_date
 from . import metrics as m
 from . import forecasting
 
@@ -408,7 +409,7 @@ def detect_issues(conn) -> list[dict]:
             # reproducible VoltPilot demo clock. Risk Areas uses this same rule;
             # otherwise Goal 07 could flag an overdue PO while this engine omitted
             # the executable expedite option.
-            demo_today = str(DEMO_TODAY)[:10]
+            demo_today = business_date().isoformat()
             delayed = [
                 p for p in pos
                 if str(p.get("status", "")).strip().lower() == "delayed"
@@ -643,7 +644,7 @@ def detect_issues(conn) -> list[dict]:
 def persist_recommendations(conn, issues: list[dict]) -> None:
     """Replace pending recommendations. Keep approved/rejected rows for history."""
     conn.execute("DELETE FROM recommendations WHERE status = 'pending'")
-    now = f"{DEMO_TODAY}T09:00:00"
+    now = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     for issue in issues:
         existing = conn.execute(
             "SELECT id, status FROM recommendations WHERE issue_key = ?",
@@ -771,7 +772,7 @@ def dashboard_payload(conn) -> dict:
     at_risk = sum(1 for r in pending if r["severity"] in ("Critical", "High"))
     audit_count = conn.execute("SELECT COUNT(*) AS c FROM audit_log").fetchone()["c"]
     return {
-        "today": DEMO_TODAY,
+        "today": business_date().isoformat(),
         "kpis": {
             "attention_items": len(pending),
             "critical_or_high": at_risk,

@@ -6,10 +6,10 @@ No LLM or external service is used. Unsupported data is explicitly marked as mis
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
-from ..config import DEMO_TODAY
+from ..config import business_date
 from .metrics import get_assumptions, sales_velocity, stock_cover_days
 
-TODAY = date.fromisoformat(DEMO_TODAY)
+TODAY = business_date()
 
 AREA_META = [
     {"id": "stockout", "number": "01", "title": "Fast sellers & stockout prevention", "short": "Fast sellers that may run out before replenishment", "description": "Compare current stock cover with supplier lead times and upcoming demand.", "icon": "stockout"},
@@ -315,6 +315,29 @@ def _analyze(conn):
         ))
     result["purchase-orders"]["findings"] = late_findings
 
+    # Distinguish an actually clear risk from a risk that cannot be evaluated
+    # because the retailer has not entered the required business records.
+    stores_count = int(conn.execute("SELECT COUNT(*) AS c FROM stores").fetchone()["c"])
+    products_count = int(conn.execute("SELECT COUNT(*) AS c FROM products").fetchone()["c"])
+    inventory_count = int(conn.execute("SELECT COUNT(*) AS c FROM inventory").fetchone()["c"])
+    supplier_offers_count = int(conn.execute("SELECT COUNT(*) AS c FROM supplier_catalog").fetchone()["c"])
+    promotions_count = int(conn.execute("SELECT COUNT(*) AS c FROM promotions").fetchone()["c"])
+    purchase_orders_count = int(conn.execute("SELECT COUNT(*) AS c FROM purchase_orders").fetchone()["c"])
+    sales_count = int(conn.execute("SELECT COUNT(*) AS c FROM retail_transaction_items").fetchone()["c"]) + int(conn.execute("SELECT COUNT(*) AS c FROM sales_history_observations").fetchone()["c"])
+    data_requirements = {
+        "stockout": (not stores_count or not products_count or not inventory_count, "Add stores, products and their opening stock to evaluate stockout risk."),
+        "ageing": (not stores_count or not inventory_count or not any(int(r.get("days_on_hand") or 0) > 0 for r in rows), "Record inventory on hand and stock age / receipt dates before assessing ageing stock."),
+        "promotions": (not promotions_count and sales_count < 14, "Add promotion/event dates and enough observed sales history to evaluate demand spikes."),
+        "launches": (True, "Add product family, predecessor/successor SKU and new-launch date to evaluate old-model demand loss."),
+        "suppliers": (not supplier_offers_count, "Add suppliers and product offers with price, lead time, available quantity, MOQ and reliability."),
+        "imbalance": (stores_count < 2 or not inventory_count, "Add at least two stores with inventory for the same product before comparing inter-store imbalance."),
+        "purchase-orders": (not purchase_orders_count, "Add purchase orders with supplier, product, destination, ordered quantity and expected arrival date."),
+    }
+    for area_id, (needs_data, note) in data_requirements.items():
+        if needs_data and not result[area_id]["findings"]:
+            result[area_id]["status"] = "needs_data"
+            result[area_id]["data_note"] = note
+
     # Finalize status and counts; counts always reflect finding rows above.
     for key, area in result.items():
         area["issue_count"] = 0 if area["status"] == "needs_data" else len(area["findings"])
@@ -329,12 +352,12 @@ def _analyze(conn):
     latest_sale = conn.execute("SELECT MAX(created_at) AS value FROM retail_transactions").fetchone()["value"]
     latest_activity = conn.execute("SELECT MAX(timestamp) AS value FROM audit_log").fetchone()["value"]
     return {
-        "today": DEMO_TODAY,
+        "today": business_date().isoformat(),
         "last_analyzed_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         "latest_sale_at": latest_sale,
         "latest_activity_at": latest_activity,
         "items": [result[m["id"]] for m in AREA_META],
-        "data_origin": "Live calculation from the current SQLite demo database on every request. A sale affects only risk areas whose evidence or thresholds are changed by that sale; supplier trade-offs or missing product-launch metadata will not arbitrarily change. Demo business date is fixed for reproducibility."
+        "data_origin": "Live calculation from the currently configured database on every request. Findings use retailer-entered products, inventory, sales, supplier, promotion and purchase-order records. No business data is invented."
     }
 
 
