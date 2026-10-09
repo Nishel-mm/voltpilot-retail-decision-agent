@@ -1,4 +1,7 @@
-const API = "/api";
+// Local development keeps using Vite's /api proxy. In production, set
+// VITE_API_BASE_URL to the deployed FastAPI origin (without trailing slash or /api).
+const API_ORIGIN = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
+const API = `${API_ORIGIN}/api`;
 
 async function request(path, options = {}) {
   const response = await fetch(`${API}${path}`, {
@@ -20,7 +23,6 @@ async function request(path, options = {}) {
   }
   return data;
 }
-
 export const api = {
   health: () => request("/health"),
   dashboard: () => request("/dashboard"),
@@ -64,7 +66,6 @@ export const api = {
   storeSales: (storeId = null) => request(`/store/sales${storeId ? `?store_id=${storeId}` : ""}`),
   storeSale: (saleId) => request(`/store/sales/${saleId}`),
 };
-
 export function inr(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
   return new Intl.NumberFormat("en-IN", {

@@ -5,14 +5,21 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = Path(os.environ.get("VOLTPILOT_DB", DATA_DIR / "voltpilot.db"))
 
-FRONTEND_ORIGINS = [
+# Local development origins plus comma-separated production origins.
+# Example: FRONTEND_ORIGINS=https://voltpilot-retail-web-nishel.onrender.com
+_CONFIGURED_FRONTEND_ORIGINS = [
+    origin.strip().rstrip("/")
+    for origin in os.environ.get("FRONTEND_ORIGINS", "").split(",")
+    if origin.strip()
+]
+FRONTEND_ORIGINS = list(dict.fromkeys([
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-]
+    *_CONFIGURED_FRONTEND_ORIGINS,
+]))
 
 # Demo clock. Seed data and promo windows are built around this date.
 DEMO_TODAY = "2026-10-09"
-
 # These are CONFIGURABLE ASSUMPTIONS, not facts from VoltKart.
 # The UI must label them as assumptions.
 DEFAULT_ASSUMPTIONS = {
