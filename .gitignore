@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.db
+node_modules/
+dist/
+.DS_Store
+Thumbs.db
+.env
+frontend/.env
+backend/data/*.db
+# Generated forecast artifacts
+backend/data/forecast_model.json
+backend/data/forecast_model_metadata.json
+
+# Local patch instructions, not project documentation
+ML_PATCH_README.txt
+PRODUCT_CATALOG_STOCK_RECEIPTS_README.txt
+SAFE_ML_FIX_README.txt
+SEVEN_RISK_AREAS_PATCH_README.txt
+STORE_POS_AND_SALES_PIPELINE_PATCH_README.txt
+SUPPLIER_UPDATES_AND_UI_PATCH_README.txt
+VOLTPILOT_LIVE_AGENT_SYNC_PATCH_README.md
+VOLTPILOT_OBSERVED_DATA_FORECAST_PATCH_README.md
