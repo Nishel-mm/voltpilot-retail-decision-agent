@@ -337,7 +337,7 @@ def _sale_summary_rows(conn, store_id: int | None = None, limit: int = 50) -> li
     if store_id is not None:
         sql += " WHERE rt.store_id = ?"
         params.append(store_id)
-    sql += " GROUP BY rt.id ORDER BY rt.id DESC LIMIT ?"
+    sql += " GROUP BY rt.id, st.name ORDER BY rt.id DESC LIMIT ?"
     params.append(max(1, min(int(limit), 100)))
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
