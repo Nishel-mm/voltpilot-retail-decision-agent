@@ -1,4 +1,4 @@
-"""VoltPilot demo store catalog helpers.
+﻿"""VoltPilot demo store catalog helpers.
 
 The starter dataset only contains eight analytical SKUs. This module safely adds
 extra checkout-friendly demonstration products to an existing database without
@@ -275,7 +275,7 @@ def list_inventory_movements(conn, store_id: int | None = None, product_id: int 
 
 def catalog_payload(conn, store_id: int) -> dict:
     from fastapi import HTTPException
-    from .metrics import get_assumptions, sales_velocity, stock_cover_days
+    from .metrics import get_assumptions, sales_velocity_map, stock_cover_days
 
     stores = [dict(r) for r in conn.execute("SELECT * FROM stores ORDER BY name").fetchall()]
     if not stores:
@@ -299,10 +299,11 @@ def catalog_payload(conn, store_id: int) -> dict:
            ORDER BY p.category, p.name""",
         (store_id,),
     ).fetchall()
+    velocities = sales_velocity_map(conn, lookback)
     items = []
     for row in rows:
         item = dict(row)
-        velocity = sales_velocity(conn, item["product_id"], store_id, lookback)
+        velocity = velocities.get((int(item["product_id"]), int(store_id)), 0.0)
         item["daily_sales_velocity"] = round(float(velocity), 3)
         item["stock_cover_days"] = stock_cover_days(item["available_qty"], velocity)
         quantity = int(item["available_qty"] or 0)
@@ -531,3 +532,5 @@ def complete_checkout(conn, body) -> dict:
         "message": "Sale saved. Inventory, sales history, and current risk analysis were updated from the connected database; payment is simulated.",
         "demo_note": "18% tax is an illustrative demo estimate only, not a statutory tax invoice. No real payment was taken.",
     }
+
+
