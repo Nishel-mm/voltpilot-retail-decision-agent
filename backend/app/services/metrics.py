@@ -52,6 +52,31 @@ def sales_velocity(conn, product_id: int, store_id: int, lookback_days: int) -> 
     return round(total / lookback_days, 3)
 
 
+def sales_velocity_map(conn, lookback_days: int) -> dict[tuple[int, int], float]:
+    """Calculate recent sales velocity for every product/store pair in one query.
+
+    This avoids one remote PostgreSQL round trip per inventory row on dashboard
+    and risk-analysis endpoints. Missing pairs are handled by callers as zero.
+    """
+    if lookback_days <= 0:
+        return {}
+    end = today()
+    start = end - timedelta(days=lookback_days)
+    rows = conn.execute(
+        """
+        SELECT product_id, store_id, COALESCE(SUM(units), 0) AS total
+        FROM sales_daily
+        WHERE sale_date > ? AND sale_date <= ?
+        GROUP BY product_id, store_id
+        """,
+        (start.isoformat(), end.isoformat()),
+    ).fetchall()
+    return {
+        (int(row["product_id"]), int(row["store_id"])): round(float(row["total"] or 0) / lookback_days, 3)
+        for row in rows
+    }
+
+
 def stock_cover_days(quantity: int, velocity: float) -> float | None:
     if quantity < 0:
         quantity = 0

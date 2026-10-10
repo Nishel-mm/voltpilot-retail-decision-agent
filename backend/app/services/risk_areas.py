@@ -7,7 +7,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from ..config import business_date
-from .metrics import get_assumptions, sales_velocity, stock_cover_days
+from .metrics import get_assumptions, sales_velocity_map, stock_cover_days
 
 TODAY = business_date()
 
@@ -69,6 +69,35 @@ def _supplier_rows(conn, product_id):
     return [dict(r) for r in rows]
 
 
+def _supplier_rows_by_product(conn):
+    """Load all supplier offers once, grouped for constant-time lookups."""
+    rows = conn.execute("""
+        SELECT c.product_id, c.supplier_id, c.unit_price, c.lead_time_days, c.available_qty,
+               s.name AS supplier_name, s.reliability, s.risk_notes
+        FROM supplier_catalog c JOIN suppliers s ON s.id = c.supplier_id
+        ORDER BY c.product_id, c.unit_price, c.lead_time_days
+    """).fetchall()
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[int(row["product_id"])].append(dict(row))
+    return grouped
+
+
+def _active_promotions_by_product(conn, horizon=30):
+    """Load promotions once; store scope is filtered in memory per inventory pair."""
+    end = (TODAY + timedelta(days=horizon)).isoformat()
+    rows = conn.execute("""
+        SELECT id, name, start_date, end_date, product_id, store_id
+        FROM promotions
+        WHERE start_date <= ? AND end_date >= ?
+        ORDER BY start_date
+    """, (end, TODAY.isoformat())).fetchall()
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[int(row["product_id"])].append(dict(row))
+    return grouped
+
+
 def _make_finding(title, severity, product=None, store=None, evidence=None, recommendation=None, metrics=None):
     return {
         "title": title,
@@ -84,11 +113,13 @@ def _make_finding(title, severity, product=None, store=None, evidence=None, reco
 def _analyze(conn):
     a = _assumptions(conn)
     rows = _inventory_rows(conn)
-    velocity = {}
-    for r in rows:
-        velocity[(r["product_id"], r["store_id"])] = sales_velocity(
-            conn, r["product_id"], r["store_id"], a["lookback"]
-        )
+    # Batch velocity, supplier, and promotion reads. Per-inventory-row queries are
+    # extremely expensive against a remote PostgreSQL database.
+    velocity = sales_velocity_map(conn, a["lookback"])
+    for row in rows:
+        velocity.setdefault((int(row["product_id"]), int(row["store_id"])), 0.0)
+    suppliers_by_product = _supplier_rows_by_product(conn)
+    promotions_by_product = _active_promotions_by_product(conn, horizon=30)
 
     result = {meta["id"]: {**meta, "status": "clear", "issue_count": 0, "severity": "Low", "findings": [], "data_note": None} for meta in AREA_META}
 
@@ -98,8 +129,11 @@ def _analyze(conn):
     for r in rows:
         quantity = int(r["quantity"] or 0)
         v = velocity[(r["product_id"], r["store_id"])]
-        suppliers = _supplier_rows(conn, r["product_id"])
-        promos = _promotion_for_pair(conn, r["product_id"], r["store_id"], horizon=30)
+        suppliers = suppliers_by_product.get(int(r["product_id"]), [])
+        promos = [
+            promo for promo in promotions_by_product.get(int(r["product_id"]), [])
+            if promo["store_id"] is None or int(promo["store_id"]) == int(r["store_id"])
+        ]
         demand = v * (1 + a["promo_uplift"] if promos else 1)
         cover = quantity / demand if demand > 0 else None
         lead = min(int(s["lead_time_days"]) for s in suppliers) if suppliers else None
@@ -201,13 +235,21 @@ def _analyze(conn):
     # observations; missing records for a new SKU are not silently treated as 0.
     weekend_findings = []
     history_start = (TODAY - timedelta(days=max(28, a["lookback"] * 2))).isoformat()
+    # Pull daily history for every product/store pair in one query instead of one
+    # query per row. The date buckets and thresholds below remain unchanged.
+    daily_rows = conn.execute("""
+        SELECT product_id, store_id, sale_date, SUM(units) AS units
+        FROM sales_daily
+        WHERE sale_date > ? AND sale_date <= ?
+        GROUP BY product_id, store_id, sale_date
+        ORDER BY sale_date
+    """, (history_start, TODAY.isoformat())).fetchall()
+    daily_by_pair = defaultdict(list)
+    for daily_row in daily_rows:
+        daily_by_pair[(int(daily_row["product_id"]), int(daily_row["store_id"]))].append(daily_row)
+
     for r in rows:
-        daily = conn.execute("""
-            SELECT sale_date, SUM(units) AS units
-            FROM sales_daily
-            WHERE product_id = ? AND store_id = ? AND sale_date > ? AND sale_date <= ?
-            GROUP BY sale_date ORDER BY sale_date
-        """, (r["product_id"], r["store_id"], history_start, TODAY.isoformat())).fetchall()
+        daily = daily_by_pair.get((int(r["product_id"]), int(r["store_id"])), [])
         weekday_values, weekend_values = [], []
         for item in daily:
             day = date.fromisoformat(item["sale_date"])
@@ -243,7 +285,7 @@ def _analyze(conn):
     supplier_findings = []
     products = conn.execute("SELECT id, name, sku FROM products ORDER BY name").fetchall()
     for p in products:
-        catalog = _supplier_rows(conn, p["id"])
+        catalog = suppliers_by_product.get(int(p["id"]), [])
         if len(catalog) < 2:
             continue
         cheapest = min(catalog, key=lambda x: x["unit_price"])
@@ -298,11 +340,13 @@ def _analyze(conn):
         ORDER BY po.expected_at
     """, (TODAY.isoformat(),)).fetchall()
     late_findings = []
+    inventory_by_pair = {(int(r["product_id"]), int(r["store_id"])): r for r in rows}
     for po in po_rows:
         expected = date.fromisoformat(po["expected_at"])
         overdue = max(0, (TODAY - expected).days)
-        v = velocity.get((po["product_id"], po["store_id"]), 0.0)
-        inv = next((r for r in rows if r["product_id"] == po["product_id"] and r["store_id"] == po["store_id"]), None)
+        pair = (int(po["product_id"]), int(po["store_id"]))
+        v = velocity.get(pair, 0.0)
+        inv = inventory_by_pair.get(pair)
         cover = (inv["quantity"] / v) if inv and v > 0 else None
         reported_delayed = str(po["status"]).lower() in ("delayed", "late", "overdue")
         po_title = f"{po['po_number']} delivery reported delayed" if reported_delayed and overdue == 0 else f"{po['po_number']} is overdue"
@@ -317,13 +361,24 @@ def _analyze(conn):
 
     # Distinguish an actually clear risk from a risk that cannot be evaluated
     # because the retailer has not entered the required business records.
-    stores_count = int(conn.execute("SELECT COUNT(*) AS c FROM stores").fetchone()["c"])
-    products_count = int(conn.execute("SELECT COUNT(*) AS c FROM products").fetchone()["c"])
-    inventory_count = int(conn.execute("SELECT COUNT(*) AS c FROM inventory").fetchone()["c"])
-    supplier_offers_count = int(conn.execute("SELECT COUNT(*) AS c FROM supplier_catalog").fetchone()["c"])
-    promotions_count = int(conn.execute("SELECT COUNT(*) AS c FROM promotions").fetchone()["c"])
-    purchase_orders_count = int(conn.execute("SELECT COUNT(*) AS c FROM purchase_orders").fetchone()["c"])
-    sales_count = int(conn.execute("SELECT COUNT(*) AS c FROM retail_transaction_items").fetchone()["c"]) + int(conn.execute("SELECT COUNT(*) AS c FROM sales_history_observations").fetchone()["c"])
+    counts = conn.execute("""
+        SELECT
+          (SELECT COUNT(*) FROM stores) AS stores_count,
+          (SELECT COUNT(*) FROM products) AS products_count,
+          (SELECT COUNT(*) FROM inventory) AS inventory_count,
+          (SELECT COUNT(*) FROM supplier_catalog) AS supplier_offers_count,
+          (SELECT COUNT(*) FROM promotions) AS promotions_count,
+          (SELECT COUNT(*) FROM purchase_orders) AS purchase_orders_count,
+          (SELECT COUNT(*) FROM retail_transaction_items) AS transaction_items_count,
+          (SELECT COUNT(*) FROM sales_history_observations) AS observations_count
+    """).fetchone()
+    stores_count = int(counts["stores_count"])
+    products_count = int(counts["products_count"])
+    inventory_count = int(counts["inventory_count"])
+    supplier_offers_count = int(counts["supplier_offers_count"])
+    promotions_count = int(counts["promotions_count"])
+    purchase_orders_count = int(counts["purchase_orders_count"])
+    sales_count = int(counts["transaction_items_count"]) + int(counts["observations_count"])
     data_requirements = {
         "stockout": (not stores_count or not products_count or not inventory_count, "Add stores, products and their opening stock to evaluate stockout risk."),
         "ageing": (not stores_count or not inventory_count or not any(int(r.get("days_on_hand") or 0) > 0 for r in rows), "Record inventory on hand and stock age / receipt dates before assessing ageing stock."),
@@ -349,8 +404,13 @@ def _analyze(conn):
         severities = [f["severity"] for f in area["findings"]]
         area["severity"] = "Critical" if "Critical" in severities else "High" if "High" in severities else "Medium" if "Medium" in severities else "Low"
         area["findings"] = area["findings"][:30]
-    latest_sale = conn.execute("SELECT MAX(created_at) AS value FROM retail_transactions").fetchone()["value"]
-    latest_activity = conn.execute("SELECT MAX(timestamp) AS value FROM audit_log").fetchone()["value"]
+    activity = conn.execute("""
+        SELECT
+          (SELECT MAX(created_at) FROM retail_transactions) AS latest_sale,
+          (SELECT MAX(timestamp) FROM audit_log) AS latest_activity
+    """).fetchone()
+    latest_sale = activity["latest_sale"]
+    latest_activity = activity["latest_activity"]
     return {
         "today": business_date().isoformat(),
         "last_analyzed_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),

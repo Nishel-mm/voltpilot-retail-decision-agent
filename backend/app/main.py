@@ -9,7 +9,7 @@ from .schemas import DecisionAction, HealthResponse, InventoryStockReceipt, Stor
 from .seed import seed
 from .services import engine, executor, forecasting, risk_areas, storefront
 from .services.initial_store_setup import bootstrap_store_catalog
-from .services.metrics import assumption_records, get_assumptions, sales_velocity, stock_cover_days
+from .services.metrics import assumption_records, get_assumptions, sales_velocity_map, stock_cover_days
 
 
 def create_app() -> FastAPI:
@@ -155,10 +155,14 @@ def create_app() -> FastAPI:
                 ORDER BY p.name, s.name
                 """
             ).fetchall()
+            # Fetch recent sales velocity for all inventory pairs in one database
+            # round trip instead of one query per row (especially costly with Neon).
+            velocities = sales_velocity_map(conn, lookback)
             items = []
             for row in rows:
                 item = dict(row)
-                vel = sales_velocity(conn, item["product_id"], item["store_id"], lookback)
+                pair = (int(item["product_id"]), int(item["store_id"]))
+                vel = velocities.get(pair, 0.0)
                 item["velocity"] = vel
                 item["cover_days"] = stock_cover_days(item["quantity"], vel)
                 quantity = int(item["quantity"] or 0)
