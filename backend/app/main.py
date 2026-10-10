@@ -174,6 +174,57 @@ def create_app() -> FastAPI:
             products = [dict(r) for r in conn.execute("SELECT * FROM products ORDER BY id").fetchall()]
             return {"items": items, "stores": stores, "products": products}
 
+    @app.get("/api/inventory/ageing")
+    def inventory_ageing():
+        """Report age from recorded positive stock-in movements only; never invent dates."""
+        with get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT i.product_id, i.store_id, i.quantity,
+                       p.name AS product_name, p.sku, p.category, p.unit_cost, p.selling_price,
+                       s.name AS store_name, s.city,
+                       MIN(substr(m.created_at, 1, 10)) AS first_recorded_stock_in
+                FROM inventory i
+                JOIN products p ON p.id = i.product_id
+                JOIN stores s ON s.id = i.store_id
+                LEFT JOIN inventory_movements m
+                  ON m.product_id = i.product_id AND m.store_id = i.store_id
+                 AND m.movement_type IN ('opening_stock', 'stock_receipt')
+                 AND m.quantity_delta > 0
+                GROUP BY i.product_id, i.store_id, i.quantity, p.name, p.sku,
+                         p.category, p.unit_cost, p.selling_price, s.name, s.city
+                ORDER BY p.name, s.name
+                """
+            ).fetchall()
+            today = business_date()
+            items = []
+            for row in rows:
+                item = dict(row)
+                raw_date = item.pop("first_recorded_stock_in", None)
+                age = None
+                if raw_date:
+                    try:
+                        age = max(0, (today - date.fromisoformat(str(raw_date)[:10])).days)
+                    except (TypeError, ValueError):
+                        age = None
+                item["stock_age_days"] = age
+                item["age_status"] = "Needs data" if age is None else ("Old" if age >= 60 else ("Ageing" if age >= 30 else "Fresh"))
+                item["age_source"] = "Recorded stock-in movement" if age is not None else "No recorded stock-in date"
+                item["inventory_value"] = round(float(item["quantity"] or 0) * float(item["unit_cost"] or 0), 2)
+                item["value_at_risk"] = item["inventory_value"] if age is not None and age >= 30 else 0.0
+                items.append(item)
+            return {
+                "as_of": today.isoformat(),
+                "ageing_policy": "Fresh: under 30 days; Ageing: 30–59 days; Old: 60+ days. Age is measured from the earliest recorded positive opening-stock/receipt movement, not batch-level FIFO age.",
+                "items": items,
+                "summary": {
+                    "tracked": sum(1 for x in items if x["stock_age_days"] is not None),
+                    "needs_data": sum(1 for x in items if x["stock_age_days"] is None),
+                    "ageing_or_old": sum(1 for x in items if x["stock_age_days"] is not None and x["stock_age_days"] >= 30),
+                    "value_at_risk": round(sum(x["value_at_risk"] for x in items), 2),
+                },
+            }
+
     @app.get("/api/orders")
     def orders():
         with get_conn() as conn:

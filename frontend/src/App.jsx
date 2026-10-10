@@ -1,10 +1,11 @@
 import { NavLink, Route, Routes } from "react-router-dom";
 import {
-  Activity, BrainCircuit, Boxes, ClipboardList, Radar, ShieldCheck, Truck, Zap, Store,
+  Activity, BrainCircuit, Boxes, ClipboardList, Radar, ShieldCheck, Truck, Zap, Store, Clock3,
 } from "lucide-react";
 import Overview from "./pages/Overview.jsx";
 import RadarPage from "./pages/RadarPage.jsx";
 import InventoryPage from "./pages/InventoryPage.jsx";
+import InventoryAgeingPage from "./pages/InventoryAgeingPage.jsx";
 import SuppliersPage from "./pages/SuppliersPage.jsx";
 import DecisionPage from "./pages/DecisionPage.jsx";
 import AuditPage from "./pages/AuditPage.jsx";
@@ -17,6 +18,7 @@ const links = [
   { to: "/", label: "Command Center", icon: Activity },
   { to: "/radar", label: "Attention Radar", icon: Radar },
   { to: "/inventory", label: "Inventory Network", icon: Boxes },
+  { to: "/ageing", label: "Inventory Ageing", icon: Clock3 },
   { to: "/store", label: "Store & POS", icon: Store },
   { to: "/forecast", label: "Forecast Lab", icon: BrainCircuit },
   { to: "/suppliers", label: "Suppliers & POs", icon: Truck },
@@ -49,6 +51,7 @@ export default function App() {
           <Route path="/risk-areas/:id/solution/:findingIndex" element={<RiskSolutionPage />} />
           <Route path="/risk-areas/:id" element={<RiskAreasPage />} />
           <Route path="/inventory" element={<InventoryPage />} />
+          <Route path="/ageing" element={<InventoryAgeingPage />} />
           <Route path="/store" element={<StorePOS />} />
           <Route path="/store/receipt/:saleId" element={<StorePOS />} />
           <Route path="/forecast" element={<ForecastLab />} />

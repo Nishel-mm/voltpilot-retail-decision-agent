@@ -29,6 +29,7 @@ export const api = {
   recommendations: (refresh = false) => request(`/recommendations${refresh ? "?refresh=true" : ""}`),
   recommendation: (id) => request(`/recommendations/${id}`),
   inventory: () => request("/inventory"),
+  inventoryAgeing: () => request("/inventory/ageing"),
   stores: async () => (await request("/stores")).items || [],
   createStore: (payload) => request("/stores", { method: "POST", body: JSON.stringify(payload) }),
   orders: () => request("/orders"),
