@@ -180,7 +180,7 @@ def create_app() -> FastAPI:
         with get_conn() as conn:
             rows = conn.execute(
                 """
-                SELECT i.product_id, i.store_id, i.quantity,
+                SELECT i.product_id, i.store_id, i.quantity, i.age_days_override,
                        p.name AS product_name, p.sku, p.category, p.unit_cost, p.selling_price,
                        s.name AS store_name, s.city,
                        MIN(substr(m.created_at, 1, 10)) AS first_recorded_stock_in
@@ -201,15 +201,18 @@ def create_app() -> FastAPI:
             for row in rows:
                 item = dict(row)
                 raw_date = item.pop("first_recorded_stock_in", None)
-                age = None
-                if raw_date:
+                age = item.get("age_days_override")
+                age_source = "Manually entered age" if age is not None else None
+                if age is None and raw_date:
                     try:
                         age = max(0, (today - date.fromisoformat(str(raw_date)[:10])).days)
+                        age_source = "Recorded stock-in movement"
                     except (TypeError, ValueError):
                         age = None
+                item.pop("age_days_override", None)
                 item["stock_age_days"] = age
                 item["age_status"] = "Needs data" if age is None else ("Old" if age >= 60 else ("Ageing" if age >= 30 else "Fresh"))
-                item["age_source"] = "Recorded stock-in movement" if age is not None else "No recorded stock-in date"
+                item["age_source"] = age_source or "No recorded stock-in date"
                 item["inventory_value"] = round(float(item["quantity"] or 0) * float(item["unit_cost"] or 0), 2)
                 item["value_at_risk"] = item["inventory_value"] if age is not None and age >= 30 else 0.0
                 items.append(item)

@@ -15,7 +15,7 @@ export default function InventoryAgeingPage() {
   if (!data) return <div className="state">Loading inventory ageing…</div>;
   const money = (v) => inr(v);
   return <div>
-    <div className="topbar"><div><p className="eyebrow">Slow-moving stock monitor</p><h2 className="page-title">Inventory Ageing</h2><p className="sub">Track stock age using recorded opening-stock and receipt movements. Missing dates are shown as Needs data.</p></div>
+    <div className="topbar"><div><p className="eyebrow">Slow-moving stock monitor</p><h2 className="page-title">Inventory Ageing</h2><p className="sub">Track stock age using recorded stock receipts or the optional age entered when adding opening stock. Unknown dates remain Needs data.</p></div>
       <select className="btn" value={filter} onChange={(e) => setFilter(e.target.value)}><option>All</option><option>Fresh</option><option>Ageing</option><option>Old</option><option>Needs data</option></select>
     </div>
     <section className="grid" style={{gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12,marginBottom:16}}>
@@ -29,6 +29,6 @@ export default function InventoryAgeingPage() {
       {rows.map((x) => <tr key={`${x.product_id}-${x.store_id}`}><td><strong>{x.product_name}</strong><div className="muted">{x.sku}</div></td><td>{x.store_name}<div className="muted">{x.city}</div></td><td className="mono">{x.quantity}</td><td>{x.stock_age_days == null ? "—" : `${x.stock_age_days} days`}</td><td><span className={`pos-stock-badge ${x.age_status === "Old" ? "out_of_stock" : x.age_status === "Ageing" ? "low_stock" : "in_stock"}`}>{x.age_status}</span></td><td>{money(x.inventory_value)}</td><td>{x.value_at_risk ? money(x.value_at_risk) : "—"}</td><td className="muted">{x.age_source}</td></tr>)}
       {!rows.length && <tr><td colSpan="8">No inventory rows match this filter.</td></tr>}
     </tbody></table></div></section>
-    <p className="muted" style={{marginTop:12}}>Age is based on the earliest recorded stock-in movement per product/store, not batch-level FIFO. Value at risk is a screening estimate using on-hand quantity × unit cost for stock aged 30+ days; review before taking action.</p>
+    <p className="muted" style={{marginTop:12}}>Age uses a manually entered opening-stock age when supplied; otherwise it uses the earliest recorded stock-in movement per product/store. It is not batch-level FIFO. Value at risk is a screening estimate using on-hand quantity × unit cost for stock aged 30+ days; review before taking action.</p>
   </div>;
 }

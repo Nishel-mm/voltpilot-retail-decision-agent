@@ -49,7 +49,7 @@ export default function StorePOS() {
   const [restockProduct, setRestockProduct] = useState(null);
   const [savingProduct, setSavingProduct] = useState(false);
   const [savingReceipt, setSavingReceipt] = useState(false);
-  const [newProduct, setNewProduct] = useState({ sku: "", name: "", category: "Laptops", unit_cost: "", selling_price: "", initial_stock: "0", note: "New stock added through Store & Product Vault" });
+  const [newProduct, setNewProduct] = useState({ sku: "", name: "", category: "Laptops", unit_cost: "", selling_price: "", initial_stock: "0", days_in_store: "", note: "New stock added through Store & Product Vault" });
   const [receiptForm, setReceiptForm] = useState({ quantity: "1", note: "Stock received at store" });
   const [newStore, setNewStore] = useState({ code: "", name: "", city: "", region: "" });
   const [savingStore, setSavingStore] = useState(false);
@@ -192,10 +192,11 @@ export default function StorePOS() {
         store_id: Number(storeId), sku: newProduct.sku.trim(), name: newProduct.name.trim(),
         category: newProduct.category.trim(), unit_cost: Number(newProduct.unit_cost),
         selling_price: Number(newProduct.selling_price), initial_stock: Number(newProduct.initial_stock),
+        days_in_store: newProduct.days_in_store === "" ? null : Number(newProduct.days_in_store),
         note: newProduct.note.trim(),
       });
       setShowNewProduct(false);
-      setNewProduct({ sku: "", name: "", category: "Laptops", unit_cost: "", selling_price: "", initial_stock: "0", note: "New stock added through Store & Product Vault" });
+      setNewProduct({ sku: "", name: "", category: "Laptops", unit_cost: "", selling_price: "", initial_stock: "0", days_in_store: "", note: "New stock added through Store & Product Vault" });
       await reloadStore();
       setNotice(result.message || "Product saved to SQLite.");
       setCategory("All products"); setSearch("");
@@ -325,6 +326,7 @@ export default function StorePOS() {
                     <label className="pos-admin-field"><span>Unit cost (₹) <b>*</b></span><input required type="number" min="0" step="0.01" value={newProduct.unit_cost} onChange={(e) => setNewProduct({ ...newProduct, unit_cost: e.target.value })} placeholder="Supplier cost" /></label>
                     <label className="pos-admin-field"><span>Selling price (₹) <b>*</b></span><input required type="number" min="0.01" step="0.01" value={newProduct.selling_price} onChange={(e) => setNewProduct({ ...newProduct, selling_price: e.target.value })} placeholder="Retail price" /></label>
                     <label className="pos-admin-field"><span>Opening stock at selected store</span><input required type="number" min="0" max="100000" step="1" value={newProduct.initial_stock} onChange={(e) => setNewProduct({ ...newProduct, initial_stock: e.target.value })} /><small>Enter 0 if the SKU is listed but stock has not arrived yet.</small></label>
+                    <label className="pos-admin-field"><span>Days in store (optional)</span><input type="number" min="0" max="36500" step="1" value={newProduct.days_in_store} onChange={(e) => setNewProduct({ ...newProduct, days_in_store: e.target.value })} placeholder="e.g. 45" /><small>Enter the known age of the opening stock. Leave blank if unknown.</small></label>
                     <label className="pos-admin-field pos-admin-field-wide"><span>Stock note</span><input maxLength={400} value={newProduct.note} onChange={(e) => setNewProduct({ ...newProduct, note: e.target.value })} placeholder="Opening stock source / note" /></label>
                   </div>
                   <div className="pos-inline-panel-footer"><p>Data is saved to the connected database and pending VoltPilot recommendations are refreshed. Product creation does not invent sales history.</p><button className="btn primary" type="submit" disabled={savingProduct}>{savingProduct ? "Saving product…" : "Save product & stock"}</button></div>
